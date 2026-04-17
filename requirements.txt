@@ -1,0 +1,10 @@
+# Core runtime
+flask>=3.0.0
+flask-cors>=4.0.0
+requests>=2.31.0
+sseclient-py>=1.8.0
+joblib>=1.3.0
+scikit-learn>=1.3.0
+
+# Optional LLM (leave out if you want pure offline)
+groq>=0.11.0
