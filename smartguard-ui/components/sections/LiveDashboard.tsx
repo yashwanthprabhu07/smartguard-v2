@@ -1,8 +1,45 @@
+/** @format */
+
 "use client";
 
 import { motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Zap, AlertTriangle, Activity } from "lucide-react";
+
+/**
+ * Browser beep using Web Audio API.
+ * Works on all devices. Called when Critical/Warning status is detected.
+ */
+function playBeep(
+  frequency: number = 800,
+  duration: number = 300,
+  type: "warning" | "critical" = "warning",
+) {
+  try {
+    const audioContext = new (
+      window.AudioContext || (window as any).webkitAudioContext
+    )();
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    oscillator.frequency.value = type === "critical" ? 1500 : frequency;
+    oscillator.type = "sine";
+
+    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(
+      0.01,
+      audioContext.currentTime + duration / 1000,
+    );
+
+    oscillator.start(audioContext.currentTime);
+    oscillator.stop(audioContext.currentTime + duration / 1000);
+  } catch (e) {
+    console.warn("Audio beep failed:", e);
+  }
+}
 
 /**
  * Live Dashboard — connects to your Flask backend (stream_server.py).
@@ -51,16 +88,18 @@ export default function LiveDashboard() {
           score: 92,
           status: "healthy" as const,
         },
-      ])
-    )
+      ]),
+    ),
   );
   const [backendLive, setBackendLive] = useState<boolean | null>(null);
   const [mode, setMode] = useState<"normal" | "overheat" | "vibration">(
-    "normal"
+    "normal",
   );
 
   const sourcesRef = useRef<EventSource[]>([]);
   const fallbackRef = useRef<number | null>(null);
+  const beepIntervalRef = useRef<number | null>(null);
+  const hasCriticalRef = useRef<boolean>(false);
 
   // Try connecting to real backend; fall back to simulator if it fails
   useEffect(() => {
@@ -105,8 +144,46 @@ export default function LiveDashboard() {
       cancelled = true;
       sourcesRef.current.forEach((s) => s.close());
       if (fallbackRef.current) window.clearInterval(fallbackRef.current);
+      if (beepIntervalRef.current)
+        window.clearInterval(beepIntervalRef.current);
     };
   }, []);
+
+  // Continuous beep every 2 seconds while critical
+  useEffect(() => {
+    const criticalMachines = Object.values(machines).filter(
+      (m) => m.status === "critical",
+    );
+    const hasCritical = criticalMachines.length > 0;
+
+    // Update the ref so interval can access it
+    hasCriticalRef.current = hasCritical;
+
+    if (hasCritical) {
+      // Start repeating beep every 2 seconds
+      if (!beepIntervalRef.current) {
+        beepIntervalRef.current = window.setInterval(() => {
+          // Use ref to get current critical status (avoids stale closure)
+          if (hasCriticalRef.current) {
+            playBeep(1500, 600, "critical");
+          }
+        }, 2000); // Beep every 2 seconds
+      }
+    } else {
+      // Stop beeping when no critical machines
+      if (beepIntervalRef.current) {
+        window.clearInterval(beepIntervalRef.current);
+        beepIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (beepIntervalRef.current) {
+        window.clearInterval(beepIntervalRef.current);
+        beepIntervalRef.current = null;
+      }
+    };
+  }, [machines]);
 
   function connectAll() {
     MACHINES.forEach((m) => {
@@ -156,7 +233,17 @@ export default function LiveDashboard() {
       score = Math.max(0, Math.min(100, score));
 
       const status: MachineState["status"] =
-        score < 35 ? "critical" : score < 65 ? "warning" : "healthy";
+        score < 60 ? "critical"
+        : score < 75 ? "warning"
+        : "healthy";
+
+      // Beep on status change (immediate feedback)
+      const prevStatus = m.status;
+      if (status === "critical" && prevStatus !== "critical") {
+        playBeep(1500, 600, "critical");
+      } else if (status === "warning" && prevStatus !== "warning") {
+        playBeep(900, 300, "warning");
+      }
 
       return {
         ...prev,
@@ -167,12 +254,19 @@ export default function LiveDashboard() {
 
   async function injectMode(newMode: "normal" | "overheat" | "vibration") {
     setMode(newMode);
-    if (backendLive) {
-      try {
-        await fetch(`/api/set_mode?mode=${newMode}`);
-      } catch {}
-    } else {
-      // In simulator mode, patch our own reading generator
+
+    // ALWAYS call the backend to set the mode (even in simulator)
+    try {
+      const response = await fetch(`/api/set_mode?mode=${newMode}`);
+      if (response.ok) {
+        console.log(`✅ Mode set on backend: ${newMode}`);
+      }
+    } catch (err) {
+      console.warn("Backend not running, using simulator fallback:", err);
+    }
+
+    // Keep the simulator fallback for when backend is offline
+    if (!backendLive) {
       window.clearInterval(fallbackRef.current!);
       fallbackRef.current = window.setInterval(() => {
         MACHINES.forEach((m) => {
@@ -216,18 +310,16 @@ export default function LiveDashboard() {
           </h2>
           <p className="mt-6 text-lg text-fog-300 max-w-xl leading-relaxed">
             This dashboard is live — streaming data right now.{" "}
-            {backendLive === true ? (
+            {backendLive === true ?
               <span className="text-cyan-glow">
                 Connected to the Flask backend.
               </span>
-            ) : backendLive === false ? (
+            : backendLive === false ?
               <span className="text-amber-warn">
                 Running in simulator mode (start the Flask server for real
                 data).
               </span>
-            ) : (
-              <span className="text-fog-400">Connecting…</span>
-            )}
+            : <span className="text-fog-400">Connecting…</span>}
           </p>
         </motion.div>
 
@@ -262,9 +354,10 @@ export default function LiveDashboard() {
           />
           <div className="ml-auto flex items-center gap-2 font-mono text-xs text-fog-300">
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-glow live-dot" />
-            LIVE · {Object.values(machines).reduce(
+            LIVE ·{" "}
+            {Object.values(machines).reduce(
               (acc, m) => acc + m.readings.length,
-              0
+              0,
             )}{" "}
             READINGS
           </div>
@@ -310,18 +403,16 @@ function ModeButton({
   tone: "healthy" | "warning" | "critical";
 }) {
   const toneColor =
-    tone === "healthy"
-      ? "cyan-glow"
-      : tone === "warning"
-      ? "amber-warn"
-      : "red-critical";
+    tone === "healthy" ? "cyan-glow"
+    : tone === "warning" ? "amber-warn"
+    : "red-critical";
   return (
     <button
       onClick={onClick}
       className={`px-4 py-2 font-mono text-xs tracking-wider transition-all ${
-        active
-          ? `bg-${toneColor}/20 border border-${toneColor} text-${toneColor}`
-          : "border border-white/10 text-fog-300 hover:border-white/30 hover:text-white"
+        active ?
+          `bg-${toneColor}/20 border border-${toneColor} text-${toneColor}`
+        : "border border-white/10 text-fog-300 hover:border-white/30 hover:text-white"
       }`}
     >
       {label}
@@ -332,26 +423,22 @@ function ModeButton({
 function MachineCard({ machine }: { machine: MachineState }) {
   const latest = machine.readings[machine.readings.length - 1];
   const statusColor =
-    machine.status === "healthy"
-      ? "#00E5FF"
-      : machine.status === "warning"
-      ? "#FFB800"
-      : "#FF3366";
+    machine.status === "healthy" ? "#00E5FF"
+    : machine.status === "warning" ? "#FFB800"
+    : "#FF3366";
   const statusLabel =
-    machine.status === "healthy"
-      ? "HEALTHY"
-      : machine.status === "warning"
-      ? "WARNING"
-      : "CRITICAL";
+    machine.status === "healthy" ? "HEALTHY"
+    : machine.status === "warning" ? "WARNING"
+    : "CRITICAL";
 
   return (
     <div
       className="relative p-5 glass group hover:border-white/20 transition-colors"
       style={{
         boxShadow:
-          machine.status === "critical"
-            ? `0 0 30px ${statusColor}20`
-            : undefined,
+          machine.status === "critical" ?
+            `0 0 30px ${statusColor}20`
+          : undefined,
       }}
     >
       {/* Status strip */}

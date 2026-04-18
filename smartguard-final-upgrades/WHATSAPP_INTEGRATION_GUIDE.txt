@@ -1,0 +1,114 @@
+# INTEGRATING WHATSAPP INTO smartguard_agent.py
+
+## Step 1: Add twilio to requirements.txt
+
+Add this line:
+```
+twilio>=9.0.0
+```
+
+Then run:
+```bash
+pip install twilio
+```
+
+## Step 2: Import the WhatsApp alerter
+
+At the top of smartguard_agent.py, after the other imports, add:
+
+```python
+# Import WhatsApp alerter (make sure whatsapp_alerter.py is in the same folder)
+try:
+    from whatsapp_alerter import send_whatsapp_alert
+    WHATSAPP_ENABLED = True
+except ImportError:
+    WHATSAPP_ENABLED = False
+    def send_whatsapp_alert(*args, **kwargs):
+        return False
+```
+
+## Step 3: Modify the dispatch_alert() function
+
+Find the `dispatch_alert()` function (around line 280) and replace it with:
+
+```python
+def dispatch_alert(machine_id: str, status: str, fault: str, reason: str, 
+                   temperature: float, vibration: float, eta: str) -> str:
+    """Return a one-line human-readable action summary + send WhatsApp if enabled."""
+    
+    # Cross-platform beep
+    if status == "Critical":
+        beep(1500, 600)
+        action = "Machine shutdown initiated"
+    elif status == "Warning":
+        beep(900, 300)
+        action = "Maintenance ticket created"
+    else:
+        action = "None"
+    
+    # WhatsApp alert (only for Warning/Critical)
+    if WHATSAPP_ENABLED and status in ("Warning", "Critical"):
+        send_whatsapp_alert(
+            machine_id=machine_id,
+            status=status,
+            fault=fault,
+            temperature=temperature,
+            vibration=vibration,
+            eta=eta
+        )
+    
+    return action
+```
+
+## Step 4: Update the call to dispatch_alert
+
+Find where `dispatch_alert()` is called (around line 550 in `_process_reading()`).
+
+Change this:
+```python
+action = dispatch_alert(
+    brain.machine_id, status,
+    reasoning["fault"], reasoning["reason"]
+)
+```
+
+To this:
+```python
+action = dispatch_alert(
+    machine_id=brain.machine_id,
+    status=status,
+    fault=reasoning["fault"],
+    reason=reasoning["reason"],
+    temperature=temp,
+    vibration=vib,
+    eta=failure_time  # this variable is computed just above
+)
+```
+
+That's it. Now Critical/Warning alerts fire WhatsApp messages.
+
+## Step 5: Configure Twilio (before running)
+
+```powershell
+# Windows PowerShell
+$env:TWILIO_ACCOUNT_SID = "your_twilio_account_sid"
+$env:TWILIO_AUTH_TOKEN = "your_auth_token"
+$env:TWILIO_WHATSAPP_FROM = "whatsapp:+14155238886"
+$env:TWILIO_WHATSAPP_TO = "whatsapp:+919876543210"  # YOUR phone with country code
+```
+
+```bash
+# Linux/Mac
+export TWILIO_ACCOUNT_SID="your_twilio_account_sid"
+export TWILIO_AUTH_TOKEN="your_auth_token"
+export TWILIO_WHATSAPP_FROM="whatsapp:+14155238886"
+export TWILIO_WHATSAPP_TO="whatsapp:+919876543210"
+```
+
+## Step 6: Test standalone first
+
+```bash
+python whatsapp_alerter.py
+```
+
+You should get a WhatsApp message on your phone. If that works, run the full agent and trigger an anomaly (overheat or vibration mode in stream_server.py).

@@ -1,0 +1,66 @@
+// ADD THIS AT THE TOP OF LiveDashboard.tsx, after the imports:
+
+/**
+ * Browser beep using Web Audio API.
+ * Works on all devices. Called when Critical/Warning status is detected.
+ */
+function playBeep(frequency: number = 800, duration: number = 300, type: 'warning' | 'critical' = 'warning') {
+  try {
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    oscillator.frequency.value = type === 'critical' ? 1500 : frequency;
+    oscillator.type = 'sine';
+
+    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration / 1000);
+
+    oscillator.start(audioContext.currentTime);
+    oscillator.stop(audioContext.currentTime + duration / 1000);
+  } catch (e) {
+    console.warn('Audio beep failed:', e);
+  }
+}
+
+
+// THEN, FIND THE `pushReading` FUNCTION (around line 130)
+// ADD THIS INSIDE, right after the `const status = ...` line:
+
+function pushReading(r: Reading) {
+  setMachines((prev) => {
+    const m = prev[r.machine_id];
+    if (!m) return prev;
+    const nextReadings = [...m.readings, r].slice(-30);
+
+    let score = 100;
+    if (r.temperature_C > 80) score -= 50;
+    else if (r.temperature_C > 70) score -= 25;
+    else if (r.temperature_C > 60) score -= 10;
+
+    if (r.vibration_mm_s > 7) score -= 40;
+    else if (r.vibration_mm_s > 4) score -= 20;
+    else if (r.vibration_mm_s > 2.5) score -= 8;
+
+    score = Math.max(0, Math.min(100, score));
+
+    const status: MachineState["status"] =
+      score < 35 ? "critical" : score < 65 ? "warning" : "healthy";
+
+    // NEW CODE — Add beep on status change
+    const prevStatus = m.status;
+    if (status === "critical" && prevStatus !== "critical") {
+      playBeep(1500, 600, 'critical');
+    } else if (status === "warning" && prevStatus !== "warning") {
+      playBeep(900, 300, 'warning');
+    }
+
+    return {
+      ...prev,
+      [r.machine_id]: { ...m, readings: nextReadings, score, status },
+    };
+  });
+}
